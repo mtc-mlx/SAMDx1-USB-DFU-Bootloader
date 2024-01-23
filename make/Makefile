@@ -7,13 +7,15 @@ BIN = D11boot
 
 CC = arm-none-eabi-gcc
 OBJCOPY = arm-none-eabi-objcopy
+OBJDUMP = arm-none-eabi-objdump
 SIZE = arm-none-eabi-size
 
-ifeq ($(OS), Windows_NT)
+ifeq ($(OS)$(MSYSTEM), Windows_NT)
   MKDIR = gmkdir
 else
   MKDIR = mkdir
 endif
+
 
 CFLAGS += -W -Wall --std=gnu99 -Os -g3
 CFLAGS += -Wno-address-of-packed-member
@@ -47,7 +49,7 @@ ASFLAGS += $(CFLAGS)
 OBJS = $(addprefix $(BUILD)/, $(notdir %/$(subst .c,.o, $(SRCS))))
 OBJS += $(BUILD)/startup.o
 
-all: directory $(BUILD)/$(BIN).elf $(BUILD)/$(BIN).hex $(BUILD)/$(BIN).bin size
+all: directory $(BUILD)/$(BIN).elf $(BUILD)/$(BIN).hex $(BUILD)/$(BIN).bin $(BUILD)/$(BIN).lss size
 
 $(BUILD)/$(BIN).elf: $(OBJS)
 	@echo LD $@
@@ -60,6 +62,10 @@ $(BUILD)/$(BIN).hex: $(BUILD)/$(BIN).elf
 $(BUILD)/$(BIN).bin: $(BUILD)/$(BIN).elf
 	@echo OBJCOPY $@
 	@$(OBJCOPY) -O binary $^ $@
+
+$(BUILD)/$(BIN).lss: $(BUILD)/$(BIN).elf
+	@echo OBJDUMP $@
+	@$(OBJDUMP) -h -S -z $< > $@
 
 %.o:
 	@echo CC $@
