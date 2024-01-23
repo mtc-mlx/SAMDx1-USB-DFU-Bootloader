@@ -85,9 +85,9 @@ usb_configuration_hierarchy_t usb_configuration_hierarchy __attribute__ ((aligne
   {
     .bLength             = sizeof(usb_dfu_descriptor_t),
     .bDescriptorType     = 33,
-    .bmAttributes        = 3,
+    .bmAttributes        = 0b1101,
     .wDetachTimeout      = 0,
     .wTransferSize       = 64,
-    .bcdDFU              = 0x100,
+    .bcdDFUVersion       = 0x110,
   },
 };

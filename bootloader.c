@@ -67,15 +67,18 @@ typedef struct
 
 /*- Variables ---------------------------------------------------------------*/
 static uint32_t usb_config = 0;
-static uint32_t dfu_status_choices[4] =
-{ 
-  0x00000000, 0x00000002, /* normal */
-  0x00000000, 0x00000005, /* dl */
-};
+static dfu_getstatus_response_t dfu_getstatus_response;
+#if 0
+static uint32_t usb_interface = 0;
+#endif
 
 static udc_mem_t udc_mem[USB_EPT_NUM];
-static uint32_t udc_ctrl_in_buf[16];
-static uint32_t udc_ctrl_out_buf[16];
+static uint32_t udc_control_out_buf[16];
+static uint32_t dfu_block_num;
+static uint32_t expected_block_length;
+
+/* Start address for the next flash write */
+static uint32_t *nvm_tail_ptr;
 
 static volatile bl_info_t __attribute__((section(".bl_info"))) bl_info;
 
@@ -89,155 +92,303 @@ static void __attribute__((noinline)) udc_control_send(const uint32_t *data, uin
 
   udc_mem[0].in.PCKSIZE.reg = USB_DEVICE_PCKSIZE_BYTE_COUNT(size) | USB_DEVICE_PCKSIZE_MULTI_PACKET_SIZE(0) | USB_DEVICE_PCKSIZE_SIZE(3 /*64 Byte*/);
 
-  USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_TRCPT1;
+  /* Signal ready to respond to any IN packets; we can't stall OUT tokens
+   * since they are used for the status response.
+   */
   USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.reg = USB_DEVICE_EPSTATUSSET_BK1RDY;
-
-  while (0 == USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.bit.TRCPT1);
 }
 
 //-----------------------------------------------------------------------------
-static void __attribute__((noinline)) udc_control_send_zlp(void)
+static void __attribute__((noinline)) udc_control_send_positive_status(void)
 {
+  /* Since this is the status transaction, there is no reason the host should
+   * send an OUT token. Stall that endpoint to make sure.
+   */
+  USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.reg = USB_DEVICE_EPSTATUSSET_STALLRQ0;
   udc_control_send(NULL, 0); /* peripheral can't read from NULL address, but size is zero and this value takes less space to compile */
 }
 
-//-----------------------------------------------------------------------------
-static void __attribute__((noinline)) USB_Service(void)
+static void __attribute__((noinline)) dfu_stall_invalid_request(void)
 {
-  static uint32_t dfu_addr;
+  dfu_getstatus_response.dwStateAndString = DFU_STATE_DFU_ERROR;
+  dfu_getstatus_response.dwStatusAndPollTimeout = DFU_STATUS_ERR_STALLEDPKT;
+  USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.reg = USB_DEVICE_EPSTATUSSET_STALLRQ0 | USB_DEVICE_EPSTATUSSET_STALLRQ1;
+}
 
-  if (USB->DEVICE.INTFLAG.bit.EORST) /* End Of Reset */
+//-----------------------------------------------------------------------------
+static inline void __attribute__((always_inline)) USB_Service(void)
+{
+  uint32_t flags;
+
+  /* Check and clear device interrupt flags */
+  flags = USB->DEVICE.INTFLAG.reg;
+  USB->DEVICE.INTFLAG.reg = flags;
+
+  if (flags & USB_DEVICE_INTFLAG_EORST) /* End Of Reset */
   {
-    USB->DEVICE.INTFLAG.reg = USB_DEVICE_INTFLAG_EORST;
-    USB->DEVICE.DADD.reg = USB_DEVICE_DADD_ADDEN;
+    /* Technically, the DFU spec requires resetting into the application
+     * firmware when receiving a USB reset. (Almost) no one does this because
+     * most OSes send one or more resets during enumeration. Instead,
+     * we implement the DFU_DETACH command; see below.
+     */
 
-    udc_mem[0].in.ADDR.reg = (uint32_t)udc_ctrl_in_buf;
-    udc_mem[0].in.PCKSIZE.reg = USB_DEVICE_PCKSIZE_BYTE_COUNT(0) | USB_DEVICE_PCKSIZE_MULTI_PACKET_SIZE(0) | USB_DEVICE_PCKSIZE_SIZE(3 /*64 Byte*/);
-
-    udc_mem[0].out.ADDR.reg = (uint32_t)udc_ctrl_out_buf;
+    /* No need to initialize IN descriptor; it will be initialized in
+     * udc_control_send() and not fetched until STALLRQ1 is cleared and BK1RDY
+     * is set and an IN token is received.
+     */
+    udc_mem[0].out.ADDR.reg = (uint32_t)udc_control_out_buf;
     udc_mem[0].out.PCKSIZE.reg = USB_DEVICE_PCKSIZE_BYTE_COUNT(64) | USB_DEVICE_PCKSIZE_MULTI_PACKET_SIZE(0) | USB_DEVICE_PCKSIZE_SIZE(3 /*64 Byte*/);
 
-
     USB->DEVICE.DeviceEndpoint[0].EPCFG.reg = USB_DEVICE_EPCFG_EPTYPE0(1 /*CONTROL*/) | USB_DEVICE_EPCFG_EPTYPE1(1 /*CONTROL*/);
-    /* Allow SETUP and OUT transactions to be received, but NAK all IN transactions. */
-    USB->DEVICE.DeviceEndpoint[0].EPSTATUSCLR.reg = USB_DEVICE_EPSTATUSCLR_BK1RDY | USB_DEVICE_EPSTATUSCLR_BK0RDY;
+    /* Return STALL until we receive a valid SETUP transaction. No need to
+     * initialize BK0RDY/BK1RDY; they are ignored for and reset by the STATUS
+     * transaction.
+     */
+    USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.reg = USB_DEVICE_EPSTATUSSET_STALLRQ0 | USB_DEVICE_EPSTATUSSET_STALLRQ1;
   }
 
-  if (USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.bit.TRCPT0) /* Transmit Complete 0 */
+  /* Check and clear endpoint interrupt flags
+   *
+   * NOTE: clearing the RXSTP bit allows another SETUP transaction to be
+   * received. That transaction could unexpectedly overwrite the data received
+   * during a control write operation. This is only a problem if the host
+   * misbehaves and does not wait for the ZLP status-stage response.
+   */
+  flags = USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.reg;
+  USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.reg = flags;
+
+  if (flags & USB_DEVICE_EPINTFLAG_TRCPT0) /* Transmit Complete 0 */
   {
-    if (dfu_addr)
+    /* An OUT transaction forms the status stage of a control read.
+     * If the host's ACK was corrupted on the final packet of the data stage,
+     * we won't get the TRCPT1 interrupt although the transfer did actually
+     * complete. So if BK1RDY is still set, we set STALLRQ1 to block non-SETUP
+     * transactions.
+     *
+     * NOTE: clearing BK1RDY is not really necessary, since STALLRQ1 takes
+     * precedence and BK1RDY will be cleared by receipt of a SETUP transaction
+     * anyway.
+     */
+    USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.reg = USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.reg >> 2;
+
+    if (dfu_getstatus_response.dwStateAndString == DFU_STATE_DFU_DNLOAD_SYNC)
     {
-      if (0 == ((dfu_addr >> 6) & 0x3))
+      if (udc_mem[0].out.PCKSIZE.bit.BYTE_COUNT != expected_block_length)
       {
-        NVMCTRL->ADDR.reg = dfu_addr >> 1;
-        NVMCTRL->CTRLA.reg = NVMCTRL_CTRLA_CMDEX_KEY | NVMCTRL_CTRLA_CMD(NVMCTRL_CTRLA_CMD_ER);
-        while (!NVMCTRL->INTFLAG.bit.READY);
+        /* Host didn't send the same number of bytes that it promised */
+        dfu_stall_invalid_request();
       }
+      else
+      {
+        uint32_t *buf_ptr = (uint32_t *)&udc_control_out_buf[0];
+        for (uint32_t i = 0; i < expected_block_length; i += 4)
+        {
+          /* If nvm_tail_ptr points to the first word in the 256-byte row,
+           * erase the row first.
+           */
+          if (!((uint32_t)nvm_tail_ptr << 24))
+          {
+            NVMCTRL->ADDR.reg = (uint32_t)nvm_tail_ptr >> 1;
+            NVMCTRL->CTRLA.reg = NVMCTRL_CTRLA_CMDEX_KEY | NVMCTRL_CTRLA_CMD_ER;
+          }
+          /* Wait for row erase to finish */
+          while (!NVMCTRL->INTFLAG.reg);
 
-      uint16_t *nvm_addr = (uint16_t *)(dfu_addr);
-      uint16_t *ram_addr = (uint16_t *)udc_ctrl_out_buf;
-      for (unsigned i = 0; i < 32; i++)
-        *nvm_addr++ = *ram_addr++;
-      while (!NVMCTRL->INTFLAG.bit.READY);
+          *nvm_tail_ptr++ = *buf_ptr++;
+        }
+        /* Wait for page write to finish */
+        while (!NVMCTRL->INTFLAG.reg);
 
-      udc_control_send_zlp();
-      dfu_addr = 0;
+        udc_control_send_positive_status();
+      }
     }
-
-    USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_TRCPT0;
   }
 
-  if (USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.bit.RXSTP) /* Received Setup */
+  if (flags & USB_DEVICE_EPINTFLAG_TRCPT1)
   {
-    USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_RXSTP;
-    USB->DEVICE.DeviceEndpoint[0].EPSTATUSCLR.reg = USB_DEVICE_EPSTATUSCLR_BK0RDY;
+    /* Transmit was complete and we signaled it with a packet smaller than
+     * bMaxPacketSize0 (always true since our descriptors are <64 bytes.)
+     * Any further IN tokens are an error.
+     */
+    USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.reg = USB_DEVICE_EPSTATUSSET_STALLRQ1;
+    USB->DEVICE.DADD.reg |= USB_DEVICE_DADD_ADDEN;
 
-    usb_request_t *request = (usb_request_t *)udc_ctrl_out_buf;
-    uint8_t type = request->wValue >> 8;
+    if (dfu_getstatus_response.dwStateAndString == DFU_STATE_DFU_DETACH)
+    {
+      /* Request system reset */
+      SCB->AIRCR  = ((0x5FA << SCB_AIRCR_VECTKEY_Pos) |
+                    SCB_AIRCR_SYSRESETREQ_Msk);
+    }
+  }
+
+  if (flags & USB_DEVICE_EPINTFLAG_RXSTP) /* Received Setup */
+  {
+    /* Subsequent OUT and IN tokens will be NAK'd until we're ready,
+     * since BK0RDY and BK1RDY were automatically set and cleared, respectively.
+     */
+
+    usb_request_t *request = (usb_request_t *)udc_control_out_buf;
     uint16_t length = request->wLength;
-    static uint32_t *dfu_status = dfu_status_choices + 0;
+    uint16_t value = request->wValue;
+    uint32_t request_type_and_request_and_value = request->dwRequestTypeAndRequestAndValue;
 
-    /* for these other USB requests, we must examine all fields in bmRequestType */
-    if (USB_CMD(OUT, INTERFACE, STANDARD) == request->bmRequestType)
+    switch (request_type_and_request_and_value)
     {
-      udc_control_send_zlp();
-      return;
-    }
-
-    /* for these "simple" USB requests, we can ignore the direction and use only bRequest */
-    switch (request->bmRequestType & 0x7F)
-    {
-    case SIMPLE_USB_CMD(DEVICE, STANDARD):
-    case SIMPLE_USB_CMD(INTERFACE, STANDARD):
-      switch (request->bRequest)
-      {
-        case USB_GET_DESCRIPTOR:
-          if (USB_DEVICE_DESCRIPTOR == type)
-          {
-            udc_control_send((uint32_t *)&usb_device_descriptor, length);
-          }
-          else if (USB_CONFIGURATION_DESCRIPTOR == type)
-          {
-            udc_control_send((uint32_t *)&usb_configuration_hierarchy, length);
-          }
-          else
-          {
-            USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.reg = USB_DEVICE_EPSTATUSSET_STALLRQ1;
-          }
-          break;
-        case USB_GET_CONFIGURATION:
-          udc_control_send(&usb_config, 1);
-          break;
-        case USB_GET_STATUS:
-          udc_control_send(dfu_status_choices + 0, 2); /* a 32-bit aligned zero in RAM is all we need */
-          break;
-        case USB_SET_FEATURE:
-        case USB_CLEAR_FEATURE:
-          USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.reg = USB_DEVICE_EPSTATUSSET_STALLRQ1;
-          break;
-        case USB_SET_ADDRESS:
-          udc_control_send_zlp();
-          USB->DEVICE.DADD.reg = USB_DEVICE_DADD_ADDEN | USB_DEVICE_DADD_DADD(request->wValue);
-          break;
-        case USB_SET_CONFIGURATION:
-          usb_config = request->wValue;
-          udc_control_send_zlp();
-          break;
-      }
-      break;
-    case SIMPLE_USB_CMD(INTERFACE, CLASS):
-      switch (request->bRequest)
-      {
-        case 0x03: // DFU_GETSTATUS
-          udc_control_send(&dfu_status[0], 6);
-          break;
-        case 0x05: // DFU_GETSTATE
-          udc_control_send(&dfu_status[1], 1);
-          break;
-        case 0x01: // DFU_DNLOAD
-          dfu_status = dfu_status_choices + 0;
-          if (request->wLength)
-          {
-            dfu_status = dfu_status_choices + 2;
-            dfu_addr = APP_ORIGIN + request->wValue * 64;
-          }
-#ifdef REBOOT_AFTER_DOWNLOAD
-          else
-          {
-            /* the download has now finished, so now reboot */
-            WDT->CONFIG.reg = WDT_CONFIG_PER_8 | WDT_CONFIG_WINDOW_8;
-            WDT->CTRL.reg = WDT_CTRL_ENABLE;
-          }
+      case USB_CMD(IN, DEVICE, STANDARD) | (USB_GET_DESCRIPTOR << 8) | (USB_DEVICE_DESCRIPTOR << 24) | (0 /* Descriptor index */ << 16):
+        udc_control_send((uint32_t *)&usb_device_descriptor, length);
+        break;
+      case USB_CMD(IN, DEVICE, STANDARD) | (USB_GET_DESCRIPTOR << 8) | (USB_CONFIGURATION_DESCRIPTOR << 24) | (0 /* Descriptor index */ << 16):
+        udc_control_send((uint32_t *)&usb_configuration_hierarchy, length);
+        break;
+      case USB_CMD(IN, DEVICE, STANDARD) | (USB_GET_CONFIGURATION << 8):
+        udc_control_send(&usb_config, 1);
+        break;
+#if 0
+      case USB_CMD(IN, INTERFACE, STANDARD) | (USB_GET_INTERFACE << 8):
+        udc_control_send(&usb_interface, 1);
+        break;
 #endif
-          /* fall through */
-        default: // DFU_UPLOAD & others
-          /* 0x00 == DFU_DETACH, 0x04 == DFU_CLRSTATUS, 0x06 == DFU_ABORT, and 0x01 == DFU_DNLOAD and 0x02 == DFU_UPLOAD */
-          if (!dfu_addr)
-            udc_control_send_zlp();
-          break;
-      }
-      break;
+#if 0
+      case USB_CMD(IN, INTERFACE, CLASS) | (DFU_REQUEST_GETSTATE << 8):
+        udc_control_send((uint32_t *)&dfu_getstatus_response.dwStateAndString, 1);
+        break;
+#endif
+      case USB_CMD(IN, INTERFACE, CLASS) | (DFU_REQUEST_GETSTATUS << 8):
+        switch (dfu_getstatus_response.dwStateAndString)
+        {
+          case DFU_STATE_DFU_DNLOAD_SYNC:
+            dfu_getstatus_response.dwStateAndString = DFU_STATE_DFU_DNLOAD_IDLE;
+            break;
+          case DFU_STATE_DFU_MANIFEST_SYNC:
+            dfu_getstatus_response.dwStateAndString = DFU_STATE_DFU_MANIFEST;
+            break;
+          case DFU_STATE_DFU_MANIFEST:
+            dfu_getstatus_response.dwStateAndString = DFU_STATE_DFU_IDLE;
+            break;
+          default:
+            break;
+        }
+        udc_control_send((uint32_t *)&dfu_getstatus_response, 6);
+        break;
+      case USB_CMD(OUT, INTERFACE, CLASS) | (DFU_REQUEST_CLRSTATUS << 8):
+        if (dfu_getstatus_response.dwStateAndString == DFU_STATE_DFU_ERROR)
+        {
+          dfu_getstatus_response.dwStatusAndPollTimeout = DFU_STATUS_OK;
+          dfu_getstatus_response.dwStateAndString = DFU_STATE_DFU_IDLE;
+          udc_control_send_positive_status();
+        }
+        else
+        {
+          dfu_stall_invalid_request();
+        }
+        break;
+#if 0
+      case USB_CMD(OUT, INTERFACE, CLASS) | (DFU_REQUEST_ABORT << 8):
+        if (dfu_getstatus_response.dwStateAndString == DFU_STATE_DFU_DNLOAD_IDLE || dfu_getstatus_response.dwStateAndString == DFU_STATE_DFU_IDLE)
+        {
+          dfu_getstatus_response.dwStatusAndPollTimeout = DFU_STATUS_OK;
+          dfu_getstatus_response.dwStateAndString = DFU_STATE_DFU_IDLE;
+          udc_control_send_positive_status();
+        }
+        else
+        {
+          dfu_stall_invalid_request();
+        }
+        break;
+#endif
+      case USB_CMD(OUT, DEVICE, STANDARD) | (USB_SET_CONFIGURATION << 8) | (0 /* Configuration index */ << 16):
+      case USB_CMD(OUT, DEVICE, STANDARD) | (USB_SET_CONFIGURATION << 8) | (1 /* Configuration index */ << 16):
+        usb_config = value;
+        udc_control_send_positive_status();
+        break;
+      default:
+        request_type_and_request_and_value <<= 16;
+        switch (request_type_and_request_and_value)
+        {
+          /* Technically, the detach request is only intended to be implemented
+           * in the application and not by the bootloader. However, strictly
+           * following the DFU specification doesn't provide any good way for
+           * the host to request the bootloader to restart into the application.
+           * (This is supposed to be done on any USB reset from the host---
+           * impractical since OSes can send any number of resets during
+           * enumeration.) Implementing the detach request follows the example
+           * of OpenMoko and dfu-util without breaking support for other tools.
+           *
+           * Some DFU host implementations (e.g. dfu-util) send bogus timeout
+           * values for the detach command even though the spec says the
+           * timeout should be no greater than the wDetachTimeout in our
+           * DFU functional descriptor (zero in our case). Therefore, we
+           * ignore wValue and match the command here. The timeout is
+           * meaningless anyway when bitWillDetach=1.
+           */
+          case (USB_CMD(OUT, INTERFACE, CLASS) | (DFU_REQUEST_DETACH << 8)) << 16:
+            udc_control_send_positive_status();
+            /* Don't reset until after the status is sent */
+            dfu_getstatus_response.dwStateAndString = DFU_STATE_DFU_DETACH;
+            break;
+          case (USB_CMD(OUT, DEVICE, STANDARD) | (USB_SET_ADDRESS << 8)) << 16:
+            udc_control_send_positive_status();
+            /* Set the address but don't enable it until the status response
+             * is sent.
+             */
+            USB->DEVICE.DADD.reg = USB_DEVICE_DADD_DADD(value);
+            break;
+          case (USB_CMD(OUT, INTERFACE, CLASS) | (DFU_REQUEST_DNLOAD << 8)) << 16:
+            switch (dfu_getstatus_response.dwStateAndString)
+            {
+              case DFU_STATE_DFU_IDLE:
+                /* First request; initialize the tail pointer. */
+                nvm_tail_ptr = (uint32_t *)(APP_ORIGIN);
+                dfu_block_num = 0;
+                /* Technically, a zero-length download request in the DFU_IDLE
+                 * state should be considered an error. However, treating it
+                 * the same as in the DFU_DNLOAD_IDLE state is harmless.
+                 */
+                /* fall through */
+              case DFU_STATE_DFU_DNLOAD_IDLE:
+                if (dfu_block_num != value || length & 0x3)
+                {
+                  /* Block counter doesn't match, or we're not receiving full words */
+                  dfu_stall_invalid_request();
+                  break;
+                }
+                ++dfu_block_num;
+
+                if (!length)
+                {
+                  dfu_getstatus_response.dwStateAndString = DFU_STATE_DFU_MANIFEST_SYNC;
+
+                  /* Flush page buffer only if the address is valid */
+                  if (NVMCTRL->ADDR.reg)
+                    NVMCTRL->CTRLA.reg = NVMCTRL_CTRLA_CMDEX_KEY | NVMCTRL_CTRLA_CMD_WP;
+                  while (!NVMCTRL->INTFLAG.reg);
+
+                  udc_control_send_positive_status();
+                  break;
+                }
+
+                expected_block_length = length;
+                dfu_getstatus_response.dwStateAndString = DFU_STATE_DFU_DNLOAD_SYNC;
+                break;
+              default:
+                /* Download request is not valid in any other state */
+                dfu_stall_invalid_request();
+            }
+            break;
+          default:
+            /* Unrecognized command; stall the pipe */
+            USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.reg = USB_DEVICE_EPSTATUSSET_STALLRQ0 | USB_DEVICE_EPSTATUSSET_STALLRQ1;
+            break;
+        }
+        break;
     }
+
+    /* Signal we are ready to receive more data. This could be either
+     * (1) The data stage of a control write
+     * (2) The host-acknowledgement for a control read.
+     * BK0RDY is ignored for SETUP transactions.
+     */
+    USB->DEVICE.DeviceEndpoint[0].EPSTATUSCLR.reg = USB_DEVICE_EPSTATUSCLR_BK0RDY;
   }
 }
 
@@ -260,8 +411,13 @@ void bootloader(uint32_t app_origin)
   DSU->CTRL.reg = DSU_CTRL_CRC; /* Strobe bits; no need for read-modify-write */
   while (!DSU->STATUSA.bit.DONE);
 
+  dfu_getstatus_response.dwStateAndString = DFU_STATE_DFU_IDLE;
   if (DSU->DATA.reg)
+  {
+    dfu_getstatus_response.dwStatusAndPollTimeout = DFU_STATUS_ERR_FIRMWARE;
+    dfu_getstatus_response.dwStateAndString = DFU_STATE_DFU_ERROR;
     goto run_bootloader; /* CRC failed, so run bootloader */
+  }
 
 #ifndef USE_DBL_TAP
   if (!(PORT->Group[0].IN.reg & (1UL << 15)))
@@ -381,7 +537,6 @@ run_bootloader:
   USB->DEVICE.PADCAL.reg = USB_PADCAL_TRANSN( NVM_READ_CAL(NVM_USB_TRANSN) ) | USB_PADCAL_TRANSP( NVM_READ_CAL(NVM_USB_TRANSP) ) | USB_PADCAL_TRIM( NVM_READ_CAL(NVM_USB_TRIM) );
 
   USB->DEVICE.DESCADD.reg = (uint32_t)udc_mem;
-
   USB->DEVICE.CTRLB.reg = USB_DEVICE_CTRLB_SPDCONF_FS;
   USB->DEVICE.CTRLA.reg = USB_CTRLA_MODE_DEVICE | USB_CTRLA_RUNSTDBY | USB_CTRLA_ENABLE;
 

@@ -52,6 +52,53 @@ enum
 
 enum
 {
+  DFU_REQUEST_DETACH            = 0,
+  DFU_REQUEST_DNLOAD            = 1,
+  DFU_REQUEST_UPLOAD            = 2,
+  DFU_REQUEST_GETSTATUS         = 3,
+  DFU_REQUEST_CLRSTATUS         = 4,
+  DFU_REQUEST_GETSTATE          = 5,
+  DFU_REQUEST_ABORT             = 6,
+};
+
+enum
+{
+  DFU_STATE_APP_IDLE                      = 0,
+  DFU_STATE_APP_DETACH                    = 1,
+  DFU_STATE_DFU_IDLE                      = 2,
+  DFU_STATE_DFU_DNLOAD_SYNC               = 3,
+  DFU_STATE_DFU_DNLOAD_BUSY               = 4,
+  DFU_STATE_DFU_DNLOAD_IDLE               = 5,
+  DFU_STATE_DFU_MANIFEST_SYNC             = 6,
+  DFU_STATE_DFU_MANIFEST                  = 7,
+  DFU_STATE_DFU_MANIFEST_WAIT_RESET       = 8,
+  DFU_STATE_DFU_UPLOAD_IDLE               = 9,
+  DFU_STATE_DFU_ERROR                     = 10,
+  DFU_STATE_DFU_DETACH                    = 15,
+};
+
+enum
+{
+  DFU_STATUS_OK                           = 0,
+  DFU_STATUS_ERR_TARGET                   = 1,
+  DFU_STATUS_ERR_FILE                     = 2,
+  DFU_STATUS_ERR_WRITE                    = 3,
+  DFU_STATUS_ERR_ERASE                    = 4,
+  DFU_STATUS_ERR_CHECK_ERASED             = 5,
+  DFU_STATUS_ERR_PROG                     = 6,
+  DFU_STATUS_ERR_VERIFY                   = 7,
+  DFU_STATUS_ERR_ADDRESS                  = 8,
+  DFU_STATUS_ERR_NOTDONE                  = 9,
+  DFU_STATUS_ERR_FIRMWARE                 = 10,
+  DFU_STATUS_ERR_VENDOR                   = 11,
+  DFU_STATUS_ERR_USBR                     = 12,
+  DFU_STATUS_ERR_POR                      = 13,
+  DFU_STATUS_ERR_UNKNOWN                  = 14,
+  DFU_STATUS_ERR_STALLEDPKT               = 15,
+};
+
+enum
+{
   USB_DEVICE_DESCRIPTOR                    = 1,
   USB_CONFIGURATION_DESCRIPTOR             = 2,
   USB_STRING_DESCRIPTOR                    = 3,
@@ -114,13 +161,22 @@ enum
 };
 
 /*- Types -------------------------------------------------------------------*/
-typedef struct PACK
+typedef union
 {
-  uint8_t   bmRequestType;
-  uint8_t   bRequest;
-  uint16_t  wValue;
-  uint16_t  wIndex;
-  uint16_t  wLength;
+  struct PACK
+  {
+    uint8_t   bmRequestType;
+    uint8_t   bRequest;
+    uint16_t  wValue;
+    uint16_t  wIndex;
+    uint16_t  wLength;
+  };
+  struct PACK
+  {
+    uint16_t    wRequestTypeAndRequest;
+    uint32_t    dwValueAndIndex;
+  };
+  uint32_t dwRequestTypeAndRequestAndValue;
 } usb_request_t;
 
 typedef struct PACK
@@ -165,6 +221,23 @@ typedef struct PACK
   uint8_t   bInterfaceProtocol;
   uint8_t   iInterface;
 } usb_interface_descriptor_t;
+
+typedef union
+{
+  struct PACK
+  {
+    uint32_t  bStatus       : 8;
+    uint32_t  bwPollTimeout : 24;
+    uint8_t   bState;
+    uint8_t   iString;
+  };
+  struct
+  {
+    uint32_t dwStatusAndPollTimeout;
+    uint32_t dwStateAndString;
+  };
+} dfu_getstatus_response_t;
+
 
 /*- Prototypes --------------------------------------------------------------*/
 

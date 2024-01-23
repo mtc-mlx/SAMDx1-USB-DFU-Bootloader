@@ -47,7 +47,7 @@ typedef struct PACK
   uint8_t   bmAttributes;
   uint16_t  wDetachTimeout;
   uint16_t  wTransferSize;
-  uint16_t  bcdDFU;
+  uint16_t  bcdDFUVersion;
 } usb_dfu_descriptor_t;
 
 typedef struct PACK
