@@ -220,6 +220,7 @@ void usb_cdc_recv(uint8_t *data, int size);
 void usb_cdc_set_state(int mask);
 void usb_cdc_clear_state(int mask);
 
+bool usb_cdc_class_handle_request(usb_request_t *request);
 void usb_cdc_send_callback(void);
 void usb_cdc_recv_callback(int size);
 void usb_cdc_line_coding_updated(usb_cdc_line_coding_t *line_coding);

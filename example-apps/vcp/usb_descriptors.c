@@ -38,13 +38,15 @@ const alignas(4) usb_device_descriptor_t usb_device_descriptor =
   .bLength            = sizeof(usb_device_descriptor_t),
   .bDescriptorType    = USB_DEVICE_DESCRIPTOR,
   .bcdUSB             = 0x0110,
-  .bDeviceClass       = USB_CDC_DEVICE_CLASS,
-  .bDeviceSubClass    = 0,
-  .bDeviceProtocol    = 0,
+
+  /* Composite device */
+  .bDeviceClass       = 0xef,
+  .bDeviceSubClass    = 0x2,
+  .bDeviceProtocol    = 0x1,
   .bMaxPacketSize0    = 64,
   .idVendor           = 0x6666,
   .idProduct          = 0x8888,
-  .bcdDevice          = 0x0100,
+  .bcdDevice          = 0x0101,
   .iManufacturer      = USB_STR_MANUFACTURER,
   .iProduct           = USB_STR_PRODUCT,
   .iSerialNumber      = USB_STR_SERIAL_NUMBER,
@@ -58,11 +60,23 @@ const alignas(4) usb_configuration_hierarchy_t usb_configuration_hierarchy =
     .bLength             = sizeof(usb_configuration_descriptor_t),
     .bDescriptorType     = USB_CONFIGURATION_DESCRIPTOR,
     .wTotalLength        = sizeof(usb_configuration_hierarchy_t),
-    .bNumInterfaces      = 2,
+    .bNumInterfaces      = 3,
     .bConfigurationValue = 1,
     .iConfiguration      = 0,
     .bmAttributes        = 0x80,
     .bMaxPower           = 50, // 100 mA
+  },
+
+  .association_cdc =
+  {
+    .bLength              = sizeof(usb_interface_association_descriptor_t),
+    .bDescriptorType      = USB_INTERFACE_ASSOCIATION_DESCRIPTOR,
+    .bFirstInterface      = 0,
+    .bInterfaceCount      = 2,
+    .bFunctionClass       = USB_CDC_DEVICE_CLASS,
+    .bFunctionSubClass    = USB_CDC_ACM_SUBCLASS,
+    .bFunctionProtocol    = 0,
+    .iFunction            = USB_STR_FUNCTION_CDC,
   },
 
   .interface_comm =
@@ -75,7 +89,7 @@ const alignas(4) usb_configuration_hierarchy_t usb_configuration_hierarchy =
     .bInterfaceClass     = USB_CDC_COMM_CLASS,
     .bInterfaceSubClass  = USB_CDC_ACM_SUBCLASS,
     .bInterfaceProtocol  = 0,
-    .iInterface          = 0,
+    .iInterface          = USB_STR_FUNCTION_DFU,
   },
 
   .cdc_header =
@@ -154,6 +168,29 @@ const alignas(4) usb_configuration_hierarchy_t usb_configuration_hierarchy =
     .wMaxPacketSize      = 64,
     .bInterval           = 0,
   },
+
+  .interface_dfu =
+  {
+    .bLength             = sizeof(usb_interface_descriptor_t),
+    .bDescriptorType     = USB_INTERFACE_DESCRIPTOR,
+    .bInterfaceNumber    = 2,
+    .bAlternateSetting   = 0,
+    .bNumEndpoints       = 0,
+    .bInterfaceClass     = 254,
+    .bInterfaceSubClass  = 1,
+    .bInterfaceProtocol  = 1,
+    .iInterface          = 0,
+  },
+
+  .dfu =
+  {
+    .bLength             = sizeof(usb_dfu_functional_descriptor_t),
+    .bDescriptorType     = 33,
+    .bmAttributes        = 0b1101,
+    .wDetachTimeout      = 0,
+    .wTransferSize       = 64,
+    .bcdDFUVersion       = 0x110,
+  },
 };
 
 const alignas(4) usb_string_descriptor_zero_t usb_string_descriptor_zero =
@@ -168,6 +205,8 @@ char usb_serial_number[16];
 const char *const usb_strings[] =
 {
   [USB_STR_MANUFACTURER]  = "Alex Taradov",
-  [USB_STR_PRODUCT]       = "Virtual COM-Port",
+  [USB_STR_PRODUCT]       = "Virtual COM-Port Composite",
   [USB_STR_SERIAL_NUMBER] = usb_serial_number,
+  [USB_STR_FUNCTION_CDC]  = "Virtual COM-Port",
+  [USB_STR_FUNCTION_DFU]  = "Virtual COM-Port DFU",
 };

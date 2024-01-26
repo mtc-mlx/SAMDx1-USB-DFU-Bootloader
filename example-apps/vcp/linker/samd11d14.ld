@@ -28,8 +28,9 @@
 
 MEMORY
 {
-  flash (rx) : ORIGIN = 0x00000400, LENGTH = 0x3C00 /* 15k */
-  ram  (rwx) : ORIGIN = 0x20000000, LENGTH = 0x1000 /* 4k */
+  flash       (rx)  : ORIGIN = 0x00000400, LENGTH = 0x3C00 /* 15k */
+  ram        (rwx)  : ORIGIN = 0x20000000, LENGTH = 0xff0 /* 4k-16 bytes bootloader info */
+  ram_bl_info (rw)  : ORIGIN = 0x20000ff0, LENGTH = 0x10  /* 16 bytes reserved for bootloader info */
 }
 
 __top_flash = ORIGIN(flash) + LENGTH(flash);
@@ -78,6 +79,10 @@ SECTIONS
     PROVIDE(_end = .);
   } > ram
 
-  PROVIDE(__stack_end__ = __top_ram - 0);
-}
+  PROVIDE(__stack_end__ = __top_ram);
 
+  .bl_info (NOLOAD): ALIGN(4)
+  {
+    *(.bl_info)
+  } > ram_bl_info
+}

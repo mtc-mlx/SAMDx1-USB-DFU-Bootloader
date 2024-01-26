@@ -26,58 +26,43 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _USB_DESCRIPTORS_H_
-#define _USB_DESCRIPTORS_H_
-
 /*- Includes ----------------------------------------------------------------*/
+#include <stdbool.h>
+#include "samd11.h"
+#include "utils.h"
 #include "usb.h"
 #include "usb_std.h"
-#include "usb_cdc.h"
 #include "usb_dfu.h"
 
-/*- Definitions -------------------------------------------------------------*/
-enum
-{
-  USB_STR_ZERO,
-  USB_STR_MANUFACTURER,
-  USB_STR_PRODUCT,
-  USB_STR_SERIAL_NUMBER,
-  USB_STR_FUNCTION_CDC,
-  USB_STR_FUNCTION_DFU,
-  USB_STR_COUNT,
+/*- Prototypes --------------------------------------------------------------*/
+
+/*- Variables ---------------------------------------------------------------*/
+static volatile dfu_getstatus_response_t dfu_getstatus_response = {
+  .bStatus = DFU_STATUS_OK,
+  .bwPollTimeout = 0,
+  .bState = DFU_STATE_APP_IDLE,
+  .iString = 0
 };
 
-enum
-{
-  USB_CDC_EP_SEND = 1,
-  USB_CDC_EP_RECV = 2,
-  USB_CDC_EP_COMM = 3,
-};
-
-/*- Types -------------------------------------------------------------------*/
-typedef struct PACK
-{
-  usb_configuration_descriptor_t                   configuration;
-  usb_interface_association_descriptor_t           association_cdc;
-  usb_interface_descriptor_t                       interface_comm;
-  usb_cdc_header_functional_descriptor_t           cdc_header;
-  usb_cdc_abstract_control_managment_descriptor_t  cdc_acm;
-  usb_cdc_call_managment_functional_descriptor_t   cdc_call_mgmt;
-  usb_cdc_union_functional_descriptor_t            cdc_union;
-  usb_endpoint_descriptor_t                        ep_comm;
-  usb_interface_descriptor_t                       interface_data;
-  usb_endpoint_descriptor_t                        ep_in;
-  usb_endpoint_descriptor_t                        ep_out;
-  usb_interface_descriptor_t                       interface_dfu;
-  usb_dfu_functional_descriptor_t                  dfu;
-} usb_configuration_hierarchy_t;
+/*- Implementations ---------------------------------------------------------*/
 
 //-----------------------------------------------------------------------------
-extern const usb_device_descriptor_t usb_device_descriptor;
-extern const usb_configuration_hierarchy_t usb_configuration_hierarchy;
-extern const usb_string_descriptor_zero_t usb_string_descriptor_zero;
-extern const char *const usb_strings[];
-extern char usb_serial_number[16];
+bool usb_dfu_class_handle_request(usb_request_t *request)
+{
+  int length = request->wLength;
 
-#endif // _USB_DESCRIPTORS_H_
-
+  switch ((request->bRequest << 8) | request->bmRequestType)
+  {
+    case USB_CMD(OUT, INTERFACE, CLASS, DFU_REQUEST_DETACH):
+      usb_control_send_zlp();
+      /* Assume bl_info.rcause_mask includes SYST bit */
+      NVIC_SystemReset();
+      break;
+    case USB_CMD(IN, INTERFACE, CLASS, DFU_REQUEST_GETSTATUS):
+      usb_control_send((uint8_t *)&dfu_getstatus_response, LIMIT(length, sizeof(dfu_getstatus_response)));
+      break;
+    default:
+      return false;
+  }
+  return true;
+}

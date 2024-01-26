@@ -34,6 +34,8 @@
 #include "usb.h"
 #include "usb_std.h"
 #include "usb_descriptors.h"
+#include "usb_cdc.h"
+#include "usb_dfu.h"
 
 /*- Types -------------------------------------------------------------------*/
 typedef void (*usb_ep_callback_t)(int size);
@@ -56,13 +58,6 @@ void usb_init(void)
 void usb_set_callback(int ep, void (*callback)(int size))
 {
   usb_ep_callbacks[ep] = callback;
-}
-
-//-----------------------------------------------------------------------------
-WEAK bool usb_class_handle_request(usb_request_t *request)
-{
-  (void)request;
-  return false;
 }
 
 //-----------------------------------------------------------------------------
@@ -243,8 +238,12 @@ bool usb_handle_standard_request(usb_request_t *request)
 
     default:
     {
-      if (!usb_class_handle_request(request))
-        return false;
+      if (request->wIndex == 0 || request->wIndex == 1)
+        return usb_cdc_class_handle_request(request);
+      else if (request->wIndex == 2)
+        return usb_dfu_class_handle_request(request);
+
+      return false;
     } break;
   }
 

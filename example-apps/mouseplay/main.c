@@ -46,10 +46,21 @@
 
 /*- Definitions -------------------------------------------------------------*/
 
+/* Types --------------------------------------------------------------------*/
+typedef struct
+{
+  uint32_t reserved2;
+  uint32_t reserved1;
+  uint32_t reserved0;
+  uint32_t rcause_mask;
+} bl_info_t;
+
 /*- Variables ---------------------------------------------------------------*/
 static alignas(4) uint8_t app_hid_report[64];
 static bool app_hid_report_free = true;
 static unsigned tick_count;
+
+static volatile bl_info_t __attribute__((section(".bl_info"))) bl_info;
 
 /*- Implementations ---------------------------------------------------------*/
 
@@ -216,6 +227,13 @@ static void hid_task(void)
 //-----------------------------------------------------------------------------
 int main(void)
 {
+  /* Implement double-tap-/RESET bootloader entry */
+  volatile int wait = 65536; while (wait--);
+  /* If we didn't get an external reset by now, the window for double-tapping
+   * the reset button has closed.
+   */
+  bl_info.rcause_mask &= ~PM_RCAUSE_EXT;
+
   sys_init();
   usb_init();
   usb_hid_init();

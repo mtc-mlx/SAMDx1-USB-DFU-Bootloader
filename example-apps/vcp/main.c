@@ -49,6 +49,15 @@ HAL_GPIO_PIN(STATUS,           A, 9);
 #define STATUS_RISING_EDGE     0 // ms
 #define STATUS_FALLING_EDGE    0 // ms
 
+/* Types --------------------------------------------------------------------*/
+typedef struct
+{
+  uint32_t reserved2;
+  uint32_t reserved1;
+  uint32_t reserved0;
+  uint32_t rcause_mask;
+} bl_info_t;
+
 /*- Variables ---------------------------------------------------------------*/
 static alignas(4) uint8_t app_recv_buffer[USB_BUFFER_SIZE];
 static alignas(4) uint8_t app_send_buffer[USB_BUFFER_SIZE];
@@ -61,6 +70,8 @@ static int app_system_time = 0;
 static int app_uart_timeout = 0;
 static bool app_status = false;
 static int app_status_timeout = 0;
+
+static volatile bl_info_t __attribute__((section(".bl_info"))) bl_info;
 
 /*- Implementations ---------------------------------------------------------*/
 
@@ -344,6 +355,13 @@ void uart_serial_state_update(int state)
 //-----------------------------------------------------------------------------
 int main(void)
 {
+  /* Implement double-tap-/RESET bootloader entry */
+  volatile int wait = 65536; while (wait--);
+  /* If we didn't get an external reset by now, the window for double-tapping
+   * the reset button has closed.
+   */
+  bl_info.rcause_mask &= ~PM_RCAUSE_EXT;
+
   sys_init();
   sys_time_init();
   usb_init();

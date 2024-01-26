@@ -168,6 +168,18 @@ typedef struct PACK
 {
   uint8_t   bLength;
   uint8_t   bDescriptorType;
+  uint8_t   bFirstInterface;
+  uint8_t   bInterfaceCount;
+  uint8_t   bFunctionClass;
+  uint8_t   bFunctionSubClass;
+  uint8_t   bFunctionProtocol;
+  uint8_t   iFunction;
+} usb_interface_association_descriptor_t;
+
+typedef struct PACK
+{
+  uint8_t   bLength;
+  uint8_t   bDescriptorType;
   uint8_t   bInterfaceNumber;
   uint8_t   bAlternateSetting;
   uint8_t   bNumEndpoints;

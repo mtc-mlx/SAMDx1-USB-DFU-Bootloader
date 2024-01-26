@@ -165,7 +165,7 @@ static void usb_cdc_set_line_coding_handler(uint8_t *data, int size)
 }
 
 //-----------------------------------------------------------------------------
-bool usb_class_handle_request(usb_request_t *request)
+bool usb_cdc_class_handle_request(usb_request_t *request)
 {
   int length = request->wLength;
 

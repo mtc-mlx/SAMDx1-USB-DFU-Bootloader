@@ -30,6 +30,7 @@ SRCS += \
   ../usb.c \
   ../usb_std.c \
   ../usb_cdc.c \
+  ../usb_dfu.c \
   ../usb_descriptors.c \
   ../startup_samd11.c
 
