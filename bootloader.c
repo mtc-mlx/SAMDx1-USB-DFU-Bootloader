@@ -2,6 +2,7 @@
  * 1kByte USB DFU bootloader for Atmel SAMD11 microcontrollers
  *
  * Copyright (c) 2018-2020, Peter Lawrence
+ * Copyright (c) 2024 Melexis Inc.
  * derived from https://github.com/ataradov/vcp Copyright (c) 2016, Alex Taradov <alex@taradov.com>
  * All rights reserved.
  *
@@ -44,11 +45,32 @@ NOTES:
 #include "usb_descriptors.h"
 
 /*- Definitions -------------------------------------------------------------*/
-#define USE_DBL_TAP /* comment out to use GPIO input for bootloader entry */
-#define REBOOT_AFTER_DOWNLOAD /* comment out to prevent boot into app after it has been downloaded */
+
+/* Support double-tap /RESET bootloader entry. The EXT bit will be set in
+ * bl_info.rcause_mask after the first external reset. The application can
+ * clear the bit after a timer. If the bit is still set and the device
+ * receives another external reset, the bootloader will begin DFU operations.
+ */
+#define USE_DOUBLE_TAP
+
+/* Enables entering the bootloader by grounding a GPIO (PA15 by default).
+ * Uncomment to enable.
+ */
+//#define USE_GPIO
+
+/* Enables handling the watchdog, in case it is enabled via the NVM user row.
+ * Only non-window operation is supported.
+ */
+//#define HANDLE_WATCHDOG
+
+/* Enable extra DFU commands and the get-interface request. These are minor
+ * features required for strict compliance and don't fit in 1k of flash,
+ * so they are only here for completeness.
+ */
+//#define ENABLE_OPTIONAL_COMMANDS
+
+/* Utility macro for standard USB device requests */
 #define USB_CMD(dir, rcpt, type) ((USB_##dir##_TRANSFER << 7) | (USB_##type##_REQUEST << 5) | (USB_##rcpt##_RECIPIENT << 0))
-#define SIMPLE_USB_CMD(rcpt, type) ((USB_##type##_REQUEST << 5) | (USB_##rcpt##_RECIPIENT << 0))
-#define DBL_TAP_MAGIC 0xf02669ef
 
 /*- Types -------------------------------------------------------------------*/
 typedef struct
@@ -62,16 +84,26 @@ typedef struct
   uint32_t reserved2;
   uint32_t reserved1;
   uint32_t reserved0;
-  uint32_t double_tap_magic;
+
+  /* This value is ANDed with the RCAUSE register. If it matches (ignoring
+   * POR, BOD12, and BOD33 bits), we begin DFU operations. By default,
+   * a software reset (SYST) or a watchdog reset (WDT) are enabled and external
+   * reset (EXT) is masked.
+   *
+   * If USE_DOUBLE_TAP is defined, EXT is unmasked after the first external
+   * reset. The application is then free to mask it again after some delay.
+   * If EXT is still unmasked and the user presses the reset button again,
+   * the bootloader will begin DFU operations.
+   */
+  uint32_t rcause_mask;
 } bl_info_t;
 
 /*- Variables ---------------------------------------------------------------*/
 static uint32_t usb_config = 0;
-static dfu_getstatus_response_t dfu_getstatus_response;
-#if 0
+#ifdef ENABLE_OPTIONAL_COMMANDS
 static uint32_t usb_interface = 0;
 #endif
-
+static dfu_getstatus_response_t dfu_getstatus_response;
 static udc_mem_t udc_mem[USB_EPT_NUM];
 static uint32_t udc_control_out_buf[16];
 static uint32_t dfu_block_num;
@@ -243,12 +275,10 @@ static inline void __attribute__((always_inline)) USB_Service(void)
       case USB_CMD(IN, DEVICE, STANDARD) | (USB_GET_CONFIGURATION << 8):
         udc_control_send(&usb_config, 1);
         break;
-#if 0
+#ifdef ENABLE_OPTIONAL_COMMANDS
       case USB_CMD(IN, INTERFACE, STANDARD) | (USB_GET_INTERFACE << 8):
         udc_control_send(&usb_interface, 1);
         break;
-#endif
-#if 0
       case USB_CMD(IN, INTERFACE, CLASS) | (DFU_REQUEST_GETSTATE << 8):
         udc_control_send((uint32_t *)&dfu_getstatus_response.dwStateAndString, 1);
         break;
@@ -282,7 +312,7 @@ static inline void __attribute__((always_inline)) USB_Service(void)
           dfu_stall_invalid_request();
         }
         break;
-#if 0
+#ifdef ENABLE_OPTIONAL_COMMANDS
       case USB_CMD(OUT, INTERFACE, CLASS) | (DFU_REQUEST_ABORT << 8):
         if (dfu_getstatus_response.dwStateAndString == DFU_STATE_DFU_DNLOAD_IDLE || dfu_getstatus_response.dwStateAndString == DFU_STATE_DFU_IDLE)
         {
@@ -395,7 +425,7 @@ static inline void __attribute__((always_inline)) USB_Service(void)
 /* App origin passed from startup to reduce code size */
 void bootloader(uint32_t app_origin)
 {
-#ifndef USE_DBL_TAP
+#ifdef USE_GPIO
   /* configure PA15 (bootloader entry pin used by SAM-BA) as input pull-up */
   PORT->Group[0].PINCFG[15].reg = PORT_PINCFG_PULLEN | PORT_PINCFG_INEN;
   PORT->Group[0].OUTSET.reg = (1UL << 15);
@@ -419,42 +449,40 @@ void bootloader(uint32_t app_origin)
     goto run_bootloader; /* CRC failed, so run bootloader */
   }
 
-#ifndef USE_DBL_TAP
+#ifdef USE_GPIO
   if (!(PORT->Group[0].IN.reg & (1UL << 15)))
     goto run_bootloader; /* pin grounded, so run bootloader */
 
   return; /* we've checked everything and there is no reason to run the bootloader */
-#else
-  if (PM->RCAUSE.reg & PM_RCAUSE_POR)
-    bl_info.double_tap_magic = 0; /* a power up event should never be considered a 'double tap' */
+#endif
 
-  if (bl_info.double_tap_magic == DBL_TAP_MAGIC)
+  register uint32_t tmp_rcause = PM->RCAUSE.reg;
+  if ((tmp_rcause & bl_info.rcause_mask) > (PM_RCAUSE_POR | PM_RCAUSE_BOD12 | PM_RCAUSE_BOD33))
   {
-    /* a 'double tap' has happened, so run bootloader */
-    bl_info.double_tap_magic = 0;
+    /* Matched SYST, EXT, or WDT reset. Do not match SYST reset next time
+     * because that is how we exit the bootloader after DFU.
+     */
+    bl_info.rcause_mask = PM_RCAUSE_WDT;
+
+    /* Report watchdog timeout as a DFU_STATUS_ERR_TARGET */
+    dfu_getstatus_response.dwStatusAndPollTimeout = (tmp_rcause >> PM_RCAUSE_WDT_Pos) & 0x1;
     goto run_bootloader;
   }
 
-  /* postpone boot for a short period of time; if a second reset happens during this window, the "magic" value will remain */
-  bl_info.double_tap_magic = DBL_TAP_MAGIC;
-
-  /* Spinning with a volatile counter forces load/store; asm saves 12 bytes. */
-  register uint32_t delay;
-  __asm__ volatile (
-    "\t.syntax unified\n"
-    "\tMOVS %0, #1\n"
-    "\tLSLS %0, %0, #18\n"
-    "reset_wait_loop:\n"
-    "\tSUBS %0, #1\n"
-    "\tBNE reset_wait_loop\n"
-    : "=l" (delay)
-    :
-    : "cc");
-
-  /* however, if execution reaches this point, the window of opportunity has closed and the "magic" disappears  */
-  bl_info.double_tap_magic = 0;
-  return;
+#ifdef USE_DOUBLE_TAP
+  /* If last reset was an external reset, add external reset to the mask
+   * so we stay in the bootloader if the user presses the reset button again.
+   * The application can clear this bit after a delay to implement a time-based
+   * double-tap behavior.
+   */
+  tmp_rcause = (tmp_rcause & PM_RCAUSE_EXT) | (PM_RCAUSE_WDT | PM_RCAUSE_SYST | PM_RCAUSE_EXT);
+  bl_info.rcause_mask = tmp_rcause;
+#else
+  /* Initialize the mask for the next soft-reset */
+  bl_info.rcause_mask = PM_RCAUSE_WDT | PM_RCAUSE_SYST;
 #endif
+
+  return;
 
 run_bootloader:
 #if 1
@@ -545,5 +573,10 @@ run_bootloader:
   */
 
   while (1)
+  {
+#ifdef HANDLE_WATCHDOG
+    WDT->CLEAR.reg = WDT_CLEAR_CLEAR_KEY;
+#endif
     USB_Service();
+  }
 }
