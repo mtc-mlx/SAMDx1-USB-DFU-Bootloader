@@ -53,10 +53,19 @@ NOTES:
  */
 #define USE_DOUBLE_TAP
 
-/* Enables entering the bootloader by grounding a GPIO (PA15 by default).
- * Uncomment to enable.
+/* Controls entering the bootloader with a GPIO (PA15 by default).
+ *
+ * GPIO_ENTRY_MODE_DISABLED: GPIO entry is disabled
+ * GPIO_ENTRY_MODE_LOW: driving the GPIO low enters the bootloader (pullup enabled)
+ * GPIO_ENTRY_MODE_HIGH: driving the GPIO to VDD enters the bootloader (pulldown enabled)
+ *
+ * Currently, only GPIO_ENTRY_MODE_HIGH will fit in 1k of flash.
  */
-//#define USE_GPIO
+#define GPIO_ENTRY_MODE GPIO_ENTRY_MODE_HIGH
+
+#define GPIO_ENTRY_MODE_DISABLED  0
+#define GPIO_ENTRY_MODE_LOW       1
+#define GPIO_ENTRY_MODE_HIGH      2
 
 /* Enables handling the watchdog, in case it is enabled via the NVM user row.
  * Only non-window operation is supported.
@@ -140,7 +149,7 @@ static void __attribute__((noinline)) udc_control_send_positive_status(void)
   udc_control_send(NULL, 0); /* peripheral can't read from NULL address, but size is zero and this value takes less space to compile */
 }
 
-static void __attribute__((noinline)) dfu_stall_invalid_request(void)
+static inline __attribute__((always_inline)) void dfu_stall_invalid_request(void)
 {
   dfu_getstatus_response.dwStateAndString = DFU_STATE_DFU_ERROR;
   dfu_getstatus_response.dwStatusAndPollTimeout = DFU_STATUS_ERR_STALLEDPKT;
@@ -425,12 +434,15 @@ static inline void __attribute__((always_inline)) USB_Service(void)
 /* App origin passed from startup to reduce code size */
 void bootloader(uint32_t app_origin)
 {
-#ifdef USE_GPIO
-  /* configure PA15 (bootloader entry pin used by SAM-BA) as input pull-up */
-  PORT->Group[0].PINCFG[15].reg = PORT_PINCFG_PULLEN | PORT_PINCFG_INEN;
+#if GPIO_ENTRY_MODE != GPIO_ENTRY_MODE_DISABLED
+  /* configure PA15 (bootloader entry pin used by SAM-BA) as input with pull */
+  //PORT->Group[0].PINCFG[15].reg = PORT_PINCFG_PULLEN | PORT_PINCFG_INEN;
+  PORT->Group[0].WRCONFIG.reg = PORT_WRCONFIG_WRPINCFG | PORT_WRCONFIG_PULLEN | PORT_WRCONFIG_INEN | PORT_WRCONFIG_PINMASK(1<<15);
+  #if GPIO_ENTRY_MODE == GPIO_ENTRY_MODE_LOW
   PORT->Group[0].OUTSET.reg = (1UL << 15);
+  #endif
 #endif
-  
+
   /*
   configure oscillator for crystal-free USB operation (USBCRM / USB Clock Recovery Mode)
   */
@@ -444,7 +456,7 @@ void bootloader(uint32_t app_origin)
    * by 32 when reducing the input clock to 1kHz, but that would make it zero...
    */
   SYSCTRL->DFLLMUL.reg = SYSCTRL_DFLLMUL_MUL(48000) | SYSCTRL_DFLLMUL_CSTEP(1) | SYSCTRL_DFLLMUL_FSTEP(1);
-  
+
   /* Since the DFLL is used in closed-loop, there is no need for a fine calibration from the fuses.
    * (It will be overwritten anyway). Using the middle value (512) follows the example in MPLAB
    * Harmony and saves 8 bytes of shift and mask instructions.
@@ -476,11 +488,12 @@ void bootloader(uint32_t app_origin)
     goto run_bootloader; /* CRC failed, so run bootloader */
   }
 
-#ifdef USE_GPIO
-  if (!(PORT->Group[0].IN.reg & (1UL << 15)))
-    goto run_bootloader; /* pin grounded, so run bootloader */
-
-  return; /* we've checked everything and there is no reason to run the bootloader */
+#if GPIO_ENTRY_MODE == GPIO_ENTRY_MODE_LOW
+  if (!(PORT->Group[0].IN.reg & (1 << 15)))
+    goto run_bootloader; /* pin is low, so run bootloader */
+#elif GPIO_ENTRY_MODE == GPIO_ENTRY_MODE_HIGH
+  if (PORT->Group[0].IN.reg & (1 << 15))
+    goto run_bootloader; /* pin is high, so run bootloader */
 #endif
 
   register uint32_t tmp_rcause = PM->RCAUSE.reg;
