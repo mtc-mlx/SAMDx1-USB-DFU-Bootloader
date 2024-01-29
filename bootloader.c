@@ -430,6 +430,33 @@ void bootloader(uint32_t app_origin)
   PORT->Group[0].PINCFG[15].reg = PORT_PINCFG_PULLEN | PORT_PINCFG_INEN;
   PORT->Group[0].OUTSET.reg = (1UL << 15);
 #endif
+  
+  /*
+  configure oscillator for crystal-free USB operation (USBCRM / USB Clock Recovery Mode)
+  */
+
+  NVMCTRL->CTRLB.reg = NVMCTRL_CTRLB_RWS_DUAL;
+
+  SYSCTRL->DFLLCTRL.reg = 0; // See Errata 9905
+
+  /* This is the same step size used by MPLAB Harmony; seems reasonable since fstep=10 yields a typical settling time
+   * of 200us with an input clock of 32kHz according to datasheet. Presumably we'd divide fstep
+   * by 32 when reducing the input clock to 1kHz, but that would make it zero...
+   */
+  SYSCTRL->DFLLMUL.reg = SYSCTRL_DFLLMUL_MUL(48000) | SYSCTRL_DFLLMUL_CSTEP(1) | SYSCTRL_DFLLMUL_FSTEP(1);
+  
+  /* Since the DFLL is used in closed-loop, there is no need for a fine calibration from the fuses.
+   * (It will be overwritten anyway). Using the middle value (512) follows the example in MPLAB
+   * Harmony and saves 8 bytes of shift and mask instructions.
+   */
+  SYSCTRL->DFLLVAL.reg = SYSCTRL_DFLLVAL_COARSE( NVM_READ_CAL(NVM_DFLL48M_COARSE_CAL) ) | SYSCTRL_DFLLVAL_FINE(512);
+
+  SYSCTRL->DFLLCTRL.reg = SYSCTRL_DFLLCTRL_ENABLE | SYSCTRL_DFLLCTRL_USBCRM | SYSCTRL_DFLLCTRL_MODE | SYSCTRL_DFLLCTRL_BPLCKC | SYSCTRL_DFLLCTRL_CCDIS;
+
+  /* No need to wait for DFLL ready signal; GCLK handles the wait in hardware
+   * and won't switch until the DFLL signals to the GCLK that it's ready.
+   */
+  GCLK->GENCTRL.reg = GCLK_GENCTRL_ID(0) | GCLK_GENCTRL_SRC(GCLK_SOURCE_DFLL48M) | GCLK_GENCTRL_RUNSTDBY | GCLK_GENCTRL_GENEN;
 
   PAC1->WPCLR.reg = 2; /* clear DSU */
 
@@ -485,33 +512,6 @@ void bootloader(uint32_t app_origin)
   return;
 
 run_bootloader:
-  /*
-  configure oscillator for crystal-free USB operation (USBCRM / USB Clock Recovery Mode)
-  */
-
-  NVMCTRL->CTRLB.reg = NVMCTRL_CTRLB_RWS_DUAL;
-
-  SYSCTRL->DFLLCTRL.reg = 0; // See Errata 9905
-
-  /* This is the same step size used by MPLAB Harmony; seems reasonable since fstep=10 yields a typical settling time
-   * of 200us with an input clock of 32kHz according to datasheet. Presumably we'd divide fstep
-   * by 32 when reducing the input clock to 1kHz, but that would make it zero...
-   */
-  SYSCTRL->DFLLMUL.reg = SYSCTRL_DFLLMUL_MUL(48000) | SYSCTRL_DFLLMUL_CSTEP(1) | SYSCTRL_DFLLMUL_FSTEP(1);
-  
-  /* Since the DFLL is used in closed-loop, there is no need for a fine calibration from the fuses.
-   * (It will be overwritten anyway). Using the middle value (512) follows the example in MPLAB
-   * Harmony and saves 8 bytes of shift and mask instructions.
-   */
-  SYSCTRL->DFLLVAL.reg = SYSCTRL_DFLLVAL_COARSE( NVM_READ_CAL(NVM_DFLL48M_COARSE_CAL) ) | SYSCTRL_DFLLVAL_FINE(512);
-
-  SYSCTRL->DFLLCTRL.reg = SYSCTRL_DFLLCTRL_ENABLE | SYSCTRL_DFLLCTRL_USBCRM | SYSCTRL_DFLLCTRL_MODE | SYSCTRL_DFLLCTRL_BPLCKC | SYSCTRL_DFLLCTRL_CCDIS;
-
-  /* No need to wait for DFLL ready signal; GCLK handles the wait in hardware
-   * and won't switch until the DFLL signals to the GCLK that it's ready.
-   */
-  GCLK->GENCTRL.reg = GCLK_GENCTRL_ID(0) | GCLK_GENCTRL_SRC(GCLK_SOURCE_DFLL48M) | GCLK_GENCTRL_RUNSTDBY | GCLK_GENCTRL_GENEN;
-
   /*
   initialize USB
   */

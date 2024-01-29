@@ -78,83 +78,9 @@ static volatile bl_info_t __attribute__((section(".bl_info"))) bl_info;
 //-----------------------------------------------------------------------------
 static void sys_init(void)
 {
+  /* Bootloader performs clock init */
+
   uint32_t sn = 0;
-
-#if 1
-  /*
-  configure oscillator for crystal-free USB operation (USBCRM / USB Clock Recovery Mode)
-  */
-  uint32_t coarse;
-
-  NVMCTRL->CTRLB.reg = NVMCTRL_CTRLB_CACHEDIS | NVMCTRL_CTRLB_RWS(2);
-
-  SYSCTRL->INTFLAG.reg = SYSCTRL_INTFLAG_BOD33RDY | SYSCTRL_INTFLAG_BOD33DET |
-      SYSCTRL_INTFLAG_DFLLRDY;
-
-  coarse = NVM_READ_CAL(NVM_DFLL48M_COARSE_CAL);
-
-  SYSCTRL->DFLLCTRL.reg = 0; // See Errata 9905
-  while (0 == (SYSCTRL->PCLKSR.reg & SYSCTRL_PCLKSR_DFLLRDY));
-
-  /* This is the same step size used by MPLAB Harmony; seems reasonable since fstep=10 yields a typical settling time
-   * of 200us with an input clock of 32kHz according to datasheet. Presumably we'd divide fstep
-   * by 32 when reducing the input clock to 1kHz, but that would make it zero...
-   */
-  SYSCTRL->DFLLMUL.reg = SYSCTRL_DFLLMUL_MUL(48000) | SYSCTRL_DFLLMUL_CSTEP(1) | SYSCTRL_DFLLMUL_FSTEP(1);
-  
-  /* Since the DFLL is used in closed-loop, there is no need for a fine calibration from the fuses.
-   * (It will be overwritten anyway). Using the middle value (512) follows the example in MPLAB
-   * Harmony and saves 8 bytes of shift and mask instructions.
-   */
-  SYSCTRL->DFLLVAL.reg = SYSCTRL_DFLLVAL_COARSE( coarse ) | SYSCTRL_DFLLVAL_FINE(512);
-
-  SYSCTRL->DFLLCTRL.reg = SYSCTRL_DFLLCTRL_ENABLE | SYSCTRL_DFLLCTRL_USBCRM |
-      SYSCTRL_DFLLCTRL_MODE | SYSCTRL_DFLLCTRL_CCDIS;
-
-  while (0 == (SYSCTRL->PCLKSR.reg & SYSCTRL_PCLKSR_DFLLRDY));
-
-  GCLK->GENCTRL.reg = GCLK_GENCTRL_ID(0) | GCLK_GENCTRL_SRC(GCLK_SOURCE_DFLL48M) |
-      GCLK_GENCTRL_RUNSTDBY | GCLK_GENCTRL_GENEN;
-  while (GCLK->STATUS.reg & GCLK_STATUS_SYNCBUSY);
-#else
-  /*
-  configure oscillator for operation disciplined by external 32k crystal
-
-  This can only be used on PCBs (such as Arduino Zero derived designs) that have these extra components populated.
-  It *should* be wholly unnecessary to use this instead of the above USBCRM code.
-  However, some problem (Sparkfun?) PCBs experience unreliable USB operation in USBCRM mode.
-  */
-
-  NVMCTRL->CTRLB.reg = NVMCTRL_CTRLB_RWS_DUAL;
-
-  SYSCTRL->XOSC32K.reg = SYSCTRL_XOSC32K_STARTUP( 0x6u ) | SYSCTRL_XOSC32K_XTALEN | SYSCTRL_XOSC32K_EN32K;
-  SYSCTRL->XOSC32K.reg |= SYSCTRL_XOSC32K_ENABLE;
-
-  while (!(SYSCTRL->PCLKSR.reg & SYSCTRL_PCLKSR_XOSC32KRDY));
-
-  GCLK->GENDIV.reg = GCLK_GENDIV_ID( 1u /* XOSC32K */ );
-
-  GCLK->GENCTRL.reg = GCLK_GENCTRL_ID( 1u /* XOSC32K */ ) | GCLK_GENCTRL_SRC_XOSC32K | GCLK_GENCTRL_GENEN;
-
-  GCLK->CLKCTRL.reg = GCLK_CLKCTRL_ID( 0u /* DFLL48M */ ) | GCLK_CLKCTRL_GEN_GCLK1 | GCLK_CLKCTRL_CLKEN;
-
-  while (GCLK->STATUS.reg & GCLK_STATUS_SYNCBUSY);
-
-  SYSCTRL->DFLLCTRL.reg = 0; // See Errata 9905
-  while (!SYSCTRL->PCLKSR.bit.DFLLRDY);
-
-  SYSCTRL->DFLLMUL.reg = SYSCTRL_DFLLMUL_CSTEP( 31 ) | SYSCTRL_DFLLMUL_FSTEP( 511 ) | SYSCTRL_DFLLMUL_MUL(48000000ul / 32768ul);
-
-  SYSCTRL->DFLLCTRL.reg = SYSCTRL_DFLLCTRL_ENABLE | SYSCTRL_DFLLCTRL_MODE | SYSCTRL_DFLLCTRL_WAITLOCK | SYSCTRL_DFLLCTRL_QLDIS;
-
-  while ( !(SYSCTRL->PCLKSR.reg & SYSCTRL_PCLKSR_DFLLLCKC) || !(SYSCTRL->PCLKSR.reg & SYSCTRL_PCLKSR_DFLLLCKF) || !(SYSCTRL->PCLKSR.reg & SYSCTRL_PCLKSR_DFLLRDY) );
-
-  GCLK->GENDIV.reg = GCLK_GENDIV_ID( 0u /* MAIN */ );
-
-  GCLK->GENCTRL.reg = GCLK_GENCTRL_ID( 0u /* MAIN */ ) | GCLK_GENCTRL_SRC_DFLL48M | GCLK_GENCTRL_IDC | GCLK_GENCTRL_GENEN;
-
-  while (GCLK->STATUS.reg & GCLK_STATUS_SYNCBUSY);
-#endif
 
   sn ^= *(volatile uint32_t *)0x0080a00c;
   sn ^= *(volatile uint32_t *)0x0080a040;
